@@ -6,13 +6,11 @@ import os
 import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 # === CONFIG ===
 st.set_page_config(layout="wide")
 
-DATA_DIR = "data"
 MODEL_DIR = "models"
 REFRESH_INTERVAL_MS = 5000  # 5 seconds refresh
 INITIAL_BALANCE = 10000
@@ -32,13 +30,17 @@ FIXED_LOT_SIZE = st.sidebar.number_input("Fixed Lot Size", min_value=0.01, value
 # === AUTO-REFRESH ===
 count = st_autorefresh(interval=REFRESH_INTERVAL_MS, key="datarefresh") if not FAST_FORWARD else 0
 
+# === TITLE ===
 st.title("📈 XAUUSD Live Simulated Streaming + Backtest")
 
-# === SELECT CSV FILE ===
-csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith(".csv")]
-selected_csv = st.selectbox("📁 Select CSV File", csv_files)
-df_full = pd.read_csv(os.path.join(DATA_DIR, selected_csv))
-df_full['time'] = pd.to_datetime(df_full['time'])
+# === CSV UPLOADER ===
+uploaded_file = st.file_uploader("📤 Upload XAUUSD CSV File", type=["csv"])
+if uploaded_file is not None:
+    df_full = pd.read_csv(uploaded_file)
+    df_full['time'] = pd.to_datetime(df_full['time'])
+else:
+    st.warning("⚠️ Please upload a CSV file to proceed.")
+    st.stop()
 
 # === SELECT MODEL & SCALER ===
 model_files = sorted([f for f in os.listdir(MODEL_DIR) if f.startswith("model_")])
@@ -52,18 +54,14 @@ scaler = joblib.load(os.path.join(MODEL_DIR, selected_scaler_file))
 
 st.success("✅ Model and scaler loaded successfully.")
 
-# === Simulate live data or full dataset ===
+# === SIMULATE LIVE DATA ===
 if len(df_full) < LOOKBACK + 10:
     st.error("Not enough data in CSV for simulation.")
     st.stop()
 
-if FAST_FORWARD:
-    df = df_full.copy()
-else:
-    max_index = min(LOOKBACK + count, len(df_full))
-    df = df_full.iloc[:max_index].copy()
+df = df_full.copy() if FAST_FORWARD else df_full.iloc[:min(LOOKBACK + count, len(df_full))].copy()
 
-# === Helper functions ===
+# === HELPER FUNCTIONS ===
 def is_ranging(data, threshold=0.001):
     closes = data['close'].values
     max_close = np.max(closes[-LOOKBACK:])
@@ -74,11 +72,9 @@ def extract_features(df, i):
     closes = df['close'].values
     ma = pd.Series(closes).rolling(window=LOOKBACK).mean().values
     returns = np.diff(closes) / closes[:-1]
-
     close_features = closes[i - LOOKBACK:i]
     return_features = returns[i - LOOKBACK:i - 1]
     ma_diff = closes[i] - ma[i]
-
     features = np.concatenate([close_features, return_features, [ma_diff]])
     return scaler.transform([features])
 
@@ -90,15 +86,12 @@ def position_size(balance, sl_points):
 
 def run_backtest(df, model, scaler):
     balance = INITIAL_BALANCE
-    trade_log = []
-    trade_markers = []
-    entry_markers = []
+    trade_log, trade_markers, entry_markers = [], [], []
     open_trade = None
-    y_true = []
-    y_pred = []
+    y_true, y_pred = [], []
 
     for i in range(LOOKBACK, len(df) - 1):
-        if open_trade is not None:
+        if open_trade:
             trade_type, entry_price, entry_time, lot_size = open_trade
             high = df['high'].iloc[i + 1]
             low = df['low'].iloc[i + 1]
@@ -172,47 +165,30 @@ def run_backtest(df, model, scaler):
 
 def plot_candles(df, trade_markers=[], entry_markers=[]):
     fig = go.Figure(data=[go.Candlestick(
-        x=df['time'],
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        increasing_line_color='green',
-        decreasing_line_color='red',
+        x=df['time'], open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'],
+        increasing_line_color='green', decreasing_line_color='red',
         name="Price"
     )])
-
     for t in trade_markers:
         fig.add_trace(go.Scatter(
-            x=[t[0]],
-            y=[t[1]],
-            mode="markers+text",
-            text=[t[2]],
-            textposition="top center",
-            marker=dict(size=10, color="blue" if "BUY" in t[2] else "red"),
+            x=[t[0]], y=[t[1]], mode="markers+text", text=[t[2]],
+            textposition="top center", marker=dict(size=10, color="blue" if "BUY" in t[2] else "red"),
             name=t[2]
         ))
-
     for t in entry_markers:
         fig.add_trace(go.Scatter(
-            x=[t[0]],
-            y=[t[1]],
-            mode="markers",
-            marker=dict(size=8, color="black", symbol="triangle-up" if t[2]=="BUY" else "triangle-down"),
+            x=[t[0]], y=[t[1]], mode="markers",
+            marker=dict(size=8, color="black", symbol="triangle-up" if t[2] == "BUY" else "triangle-down"),
             name=f"Entry {t[2]}"
         ))
-
-    fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        height=500,
-        margin=dict(l=20, r=20, t=30, b=20)
-    )
+    fig.update_layout(xaxis_rangeslider_visible=False, height=500)
     return fig
 
-# === Run backtest ===
+# === RUN BACKTEST ===
 trade_log, final_balance, trade_markers, entry_markers, metrics = run_backtest(df, model, scaler)
 
-# === Show trade log and equity curve ===
+# === TRADE LOG ===
 st.subheader("📜 Trade Log")
 trade_df = pd.DataFrame(trade_log, columns=["Time", "Action", "PnL", "Balance"])
 st.dataframe(trade_df)
@@ -222,12 +198,12 @@ st.download_button("📥 Download Trade Log", csv, "trade_log.csv", "text/csv")
 
 st.success(f"💰 Balance after Backtest: ${final_balance:.2f}")
 
-# === Metrics ===
+# === METRICS ===
 st.subheader("📊 Performance Metrics")
 for metric, value in metrics.items():
     st.metric(metric, f"{value:.2%}")
 
-# === Equity Curve ===
+# === EQUITY CURVE ===
 st.subheader("📈 Equity Curve")
 if not trade_df.empty:
     fig_eq, ax = plt.subplots()
@@ -240,12 +216,12 @@ if not trade_df.empty:
 else:
     st.write("No trades executed yet.")
 
-# === Candlestick chart ===
+# === CANDLE CHART ===
 st.subheader("📊 Live Candlestick Chart")
 candles_df = df.tail(LOOKBACK + 10)
 st.plotly_chart(plot_candles(candles_df, trade_markers, entry_markers), use_container_width=True)
 
-# === Live Prediction ===
+# === LIVE PREDICTION ===
 st.subheader("🔮 Live Prediction on Latest Candle")
 if len(df) > LOOKBACK:
     i = len(df) - 1
@@ -253,7 +229,6 @@ if len(df) > LOOKBACK:
         live_features = extract_features(df, i)
         prediction = model.predict(live_features)[0]
         prob = model.predict_proba(live_features)[0]
-
         if prediction == 1:
             st.markdown(
                 f"<div style='padding:10px;background-color:#d4edda;border-left:5px solid #28a745;'>"
